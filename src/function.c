@@ -12,8 +12,17 @@
 // Strings
 void String_serialise(const char* str, FILE* fd){
     size_t length = strlen(str);
-    fwrite(&length, sizeof(size_t),1, fd);
-    fprintf(fd, "%.*s", length, str);
+    fwrite(&length, sizeof(length),1, fd);
+    fwrite(str, length, 1, fd);
+}
+
+// requires freee
+char* String_deserialise_to_new_buffer(FILE* fd){
+    size_t length = 0;
+    fread(&length, sizeof(length), 1, fd);
+    char* string = calloc(1, length+1);
+    fread(string, length, 1, fd);
+    return string;
 }
 
 bool String_deserialise_to_buffer(char* buff, unsigned int maxLenth, FILE* fd){
@@ -23,6 +32,7 @@ bool String_deserialise_to_buffer(char* buff, unsigned int maxLenth, FILE* fd){
         return false;
     }
     fread(buff, length, 1, fd);
+    buff[length+1] = 0x0;
     return true;
 }
 
@@ -41,8 +51,8 @@ FileNode* FileNode_generate(const char* path, FILETYPE fileType){
     return node;
 }
 
-void FileNode_populate_from_directory(FileNode* node, const char* path){
-      // Recursively generate the tree from the file directory.
+void FileNode_populate_from_directory(FileNode* node, const char* path, bool shouldGenerateHash){
+    // Recursively generate the tree from the file directory.
     DIR*            fd;
     struct dirent*  in_file;
     char            pathBuffer[FILE_PATH_LENGTH];
@@ -67,7 +77,8 @@ void FileNode_populate_from_directory(FileNode* node, const char* path){
             // Generate the fDescription
             newNode->fDescription = FileDescription_generate(newNode->path);
             // Generate the file md5 hash
-            FileDescription_generate_hash(pathBuffer, newNode->fDescription);
+            if (shouldGenerateHash)
+                FileDescription_generate_hash(pathBuffer, newNode->fDescription);
 
           } else if (in_file->d_type == DT_DIR) {
             if ((strncmp(in_file->d_name, "..", 2) == 0) || (strncmp(in_file->d_name, ".", 1) == 0) ) {
@@ -76,7 +87,7 @@ void FileNode_populate_from_directory(FileNode* node, const char* path){
             strncpy(pathBuffer + szPath, in_file->d_name, strlen(in_file->d_name));
             FileNode* newNode = FileNode_generate(pathBuffer, FILETYPE_FOLDER);
             FileNode_add_child(node, newNode);
-            FileNode_populate_from_directory(newNode, pathBuffer);
+            FileNode_populate_from_directory(newNode, pathBuffer, shouldGenerateHash);
           }
       }
 
@@ -84,24 +95,27 @@ void FileNode_populate_from_directory(FileNode* node, const char* path){
 }
 
 void FileNode_resize_children(FileNode* node){
-    if ((node->count) > (node->capacity - (node->capacity/2))) {
+    if ((node->count) > (node->capacity/2)) {
+        printf("COUNT: %d\n CAPACITY (%d)\n");
         node->capacity *= 2;
+        if(node->children == NULL)
+            return;
         node->children = realloc(node->children, node->capacity * sizeof(FileNode*));
     }
 }
 
 void FileNode_add_child(FileNode* node, FileNode* child){
     node->children[node->count] = (struct FileNode*) child;
-    node->count += 1;
+    node->count = node->count + 1;
     // Resize if necessary.
     FileNode_resize_children(node);
 }
 
 void FileNode_print(FileNode* node){
     if( node->type == FILETYPE_FOLDER) {
-        printf("Folder '%s' contents:\n", node->path);
+        printf("Folder '%s' (%d) contents:\n", node->path, node->count);
         for (unsigned int i = 0; i < node->count; i++){
-            FileNode_print(node->children[i]);
+            FileNode_print((FileNode*) node->children[i]);
         }
     } else {
         printf("File: '%s'\n", node->path);
@@ -123,43 +137,46 @@ void FileNode_free(FileNode* node){
 
 void FileNode_serialise(FileNode* node, FILE* fd){
     String_serialise(node->path, fd);
-    fwrite(&node->type, sizeof(node->type), 1, fd);
+    fwrite(&node->type, sizeof(FILETYPE), 1, fd);
     if (node->type == FILETYPE_FOLDER){
         fwrite(&node->count, sizeof(node->count), 1, fd);
-        fwrite(&node->capacity, sizeof(node->capacity), 1, fd);
-        for (size_t i = 0; i < node->count; i++)
+        for (unsigned int i = 0; i < node->count; i++)
         {
-            FileNode_serialise(node->children[i], fd);
+            FileNode_serialise((FileNode*) node->children[i], fd);
         }
-    } else {
-        if (node->fDescription != NULL)
-            FileDescription_serialise(node->fDescription, fd);
+    } else if (node->type == FILETYPE_FILE) {
+        FileDescription_serialise(node->fDescription, fd);
     }
     
 }
 FileNode* FileNode_deserialise(FILE* fd){
-    char pathBuffer[FILE_PATH_LENGTH] = {0};
+    char* pathBuffer = String_deserialise_to_new_buffer(fd);
+    printf("Deserialsied string: '%s'\n", pathBuffer);
     FILETYPE fileType;
-
-    String_deserialise_to_buffer(pathBuffer, FILE_PATH_LENGTH, fd);
     fread(&fileType, sizeof(FILETYPE), 1, fd);
+    printf("deserialised fileType: '%d'\n", fileType);
     
     FileNode* node = FileNode_generate(pathBuffer, fileType); 
     if (node->type == FILETYPE_FOLDER){
-        fread(&node->count, sizeof(node->count), 1, fd);
-        fread(&node->capacity, sizeof(node->count), 1, fd);
-        for(size_t i = 0; i < node->count; i++){
+        unsigned int childrenCount = 0;
+        fread(&childrenCount, sizeof(node->count), 1, fd);
+        printf("node cnt: %u\n", node->count);
+        for(unsigned int i = 0; i < childrenCount; i++){
             FileNode* newNode = FileNode_deserialise(fd);
             FileNode_add_child(node, newNode);
         }
-    } else {
+    } else if (node->type == FILETYPE_FILE) {
         node->fDescription = FileDescription_deserialise(fd);
-    }
+        FileDescription_print_stats(node->fDescription);
+    } 
+    free(pathBuffer);
+    printf("Read a node!\n");
+    FileNode_print(node);
     return node;
 }
 
 // File Tree
-FileTree* FileTree_generate(const char* rootPath) {
+FileTree* FileTree_generate(const char* rootPath, bool shouldGenerateHashes) {
     FileTree* tree = (FileTree*) calloc(1, sizeof(FileTree));
     strncpy(tree->path, rootPath, strlen(rootPath)); 
     tree->root = FileNode_generate(".", FILETYPE_FOLDER); 
@@ -176,7 +193,7 @@ FileTree* FileTree_generate(const char* rootPath) {
     }
 
     closedir(fd);
-    FileNode_populate_from_directory(tree->root, rootPath);
+    FileNode_populate_from_directory(tree->root, rootPath, shouldGenerateHashes);
     return tree;
 }
 
@@ -189,9 +206,18 @@ bool FileTree_compare(FileTree* a, FileTree* b){
 }
 
 
+
+FileTree* FileTree_read_from_file(const char* path){
+    FileTree* tree = calloc(1, sizeof(FileTree));
+    FILE* f = fopen(path, "rb");
+    tree->root = FileNode_deserialise(f);
+    fclose(f);
+    return tree;
+}
+
 // Savees a file tree to a file
 void FileTree_save(FileTree* tree, const char* path){
-    FILE* f = open(path, "wb");
+    FILE* f = fopen(path, "wb");
 
     fclose(f);
 }
@@ -228,6 +254,7 @@ void FileDescription_serialise(FileDescription* fDescription, FILE* fd){
 FileDescription* FileDescription_deserialise(FILE* fd){
     FileDescription* fileDescription = calloc(1, sizeof(FileDescription));
     fread(fileDescription, sizeof(FileDescription), 1, fd);
+    printf("%d\n", fileDescription->length);
     return fileDescription;
 }
 
@@ -268,7 +295,7 @@ bool FileDescription_eq(FileDescription* a, FileDescription* b){
 
 
 void FileDescription_print_stats(FileDescription* fDescription){
-    printf("size: %ld\n", fDescription->length);
+    printf("size: %lld\n", fDescription->length);
     printf("modt: %ld\n", fDescription->lastModified);
     printf("hash: ");
     for (int i = 0; i < MD5_LEN; i++){

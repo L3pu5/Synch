@@ -10,6 +10,9 @@
 void String_serialise(const char* str, FILE* fd);
 // Returns false if too big for buff
 bool String_deserialise_to_buffer(char* buff, unsigned int maxLenth, FILE* fd);
+// Requires free
+char* String_deserialise_to_new_buffer(FILE* fd);
+
 
 // FILES 
 #define FILE_PATH_LENGTH 256
@@ -47,7 +50,7 @@ typedef struct _FILE_NODE {
 } FileNode;
 
 FileNode* FileNode_generate(const char* path, FILETYPE fileType);
-void FileNode_populate_from_directory(FileNode* node, const char* path);
+void FileNode_populate_from_directory(FileNode* node, const char* path, bool shouldGenerateHash);
 void FileNode_resize_children(FileNode* node);
 void FileNode_add_child(FileNode* node, FileNode* child);
 void FileNode_print(FileNode* node);
@@ -62,7 +65,8 @@ typedef struct _FILE_TREE {
     FileNode*       root;
 } FileTree;
 
-FileTree* FileTree_generate(const char* rootPath);
+FileTree* FileTree_generate(const char* rootPath, bool shouldGenerateHashes);
+FileTree* FileTree_read_from_file(const char* path);
 bool FileTree_eq(FileTree* a, FileTree* b);
 void FileTree_save(FileTree* tree, const char* path);
 void FileTree_print(FileTree* tree);

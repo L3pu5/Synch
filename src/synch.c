@@ -1,7 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include "function.h"
+#include <string.h> 
 
+#include "function.h"
 #include "server.h"
 
 
@@ -33,18 +34,42 @@ void test_ld(const char* path){
     fclose(f);
 }
 
+void test_serialise_string(const char* path){
+    FILE* f = fopen(path, "wb");
+    char* string = malloc(strlen("asd"));
+    strncpy(string, "asd", strlen("asd"));
+    String_serialise(string, f);
+    fclose(f);
+
+    f = fopen(path, "rb");
+    free(string);
+    string = calloc(1, strlen("asd"));
+    String_deserialise_to_buffer(string, strlen("asd"), f);
+    fclose(f);
+    printf("Read: '%s'\n", string);
+}
+
 void test_ft(const char* path){
-    FileTree* tree = (FileTree*) FileTree_generate(path);
+    FileTree* tree = (FileTree*) FileTree_generate(path, true);
     FileTree_print(tree);
 
-    FILE* f = fopen("test.txt", "wb");
+    FILE* f = fopen(".manifest", "wb");
     FileNode_serialise(tree->root, f);
-    fflush(f);
     fclose(f);
+}
+
+void test_ld_ft(){
+    FileTree* tree = FileTree_read_from_file(".manifest");
+    //FileTree_print(tree);
 }
 
 int main () {
     //test_fd("./Makefile");
+    //test_serialise_string("asd.txt");
+    //exit(1);
+    
     test_ft(".");
+    printf("Reading tree.\n");
+    test_ld_ft();
     //test_ld("test.txt");
 }
