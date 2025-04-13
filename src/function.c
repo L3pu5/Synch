@@ -71,6 +71,10 @@ void FileNode_populate_from_directory(FileNode* node, const char* path, bool sho
         memset(pathBuffer + szPath, 0x0, FILE_PATH_LENGTH - szPath);
         
         if (in_file->d_type == DT_REG ){
+            // Ignore the manifest itself
+            if ((strncmp(in_file->d_name, ".manifest", 10) == 0))
+                continue;
+
             strncpy(pathBuffer + szPath, in_file->d_name, strlen(in_file->d_name));
             FileNode* newNode = FileNode_generate(pathBuffer, FILETYPE_FILE);
             FileNode_add_child(node, newNode);
@@ -96,7 +100,6 @@ void FileNode_populate_from_directory(FileNode* node, const char* path, bool sho
 
 void FileNode_resize_children(FileNode* node){
     if ((node->count) > (node->capacity/2)) {
-        printf("COUNT: %d\n CAPACITY (%d)\n");
         node->capacity *= 2;
         if(node->children == NULL)
             return;
@@ -151,27 +154,22 @@ void FileNode_serialise(FileNode* node, FILE* fd){
 }
 FileNode* FileNode_deserialise(FILE* fd){
     char* pathBuffer = String_deserialise_to_new_buffer(fd);
-    printf("Deserialsied string: '%s'\n", pathBuffer);
     FILETYPE fileType;
     fread(&fileType, sizeof(FILETYPE), 1, fd);
-    printf("deserialised fileType: '%d'\n", fileType);
     
     FileNode* node = FileNode_generate(pathBuffer, fileType); 
     if (node->type == FILETYPE_FOLDER){
         unsigned int childrenCount = 0;
         fread(&childrenCount, sizeof(node->count), 1, fd);
-        printf("node cnt: %u\n", node->count);
         for(unsigned int i = 0; i < childrenCount; i++){
             FileNode* newNode = FileNode_deserialise(fd);
             FileNode_add_child(node, newNode);
         }
     } else if (node->type == FILETYPE_FILE) {
         node->fDescription = FileDescription_deserialise(fd);
-        FileDescription_print_stats(node->fDescription);
+        //FileDescription_print_stats(node->fDescription);
     } 
     free(pathBuffer);
-    printf("Read a node!\n");
-    FileNode_print(node);
     return node;
 }
 
@@ -197,16 +195,6 @@ FileTree* FileTree_generate(const char* rootPath, bool shouldGenerateHashes) {
     return tree;
 }
 
-
-
-// Returns true/0 if same, undefined if not
-bool FileTree_compare(FileTree* a, FileTree* b){
-    
-    return true;
-}
-
-
-
 FileTree* FileTree_read_from_file(const char* path){
     FileTree* tree = calloc(1, sizeof(FileTree));
     FILE* f = fopen(path, "rb");
@@ -214,6 +202,49 @@ FileTree* FileTree_read_from_file(const char* path){
     fclose(f);
     return tree;
 }
+
+FileTree* FileTree_deserialise(FILE* fd){
+    FileTree* tree = calloc(1, sizeof(FileTree));
+    tree->root = FileNode_deserialise(fd);
+    return tree;
+}
+
+bool _node_compare_type_and_name(FileNode* a, FileNode* b) {
+    if (a->type != b->type)
+        return false;
+    
+    if( a->type == FILETYPE_FOLDER){
+        if (a->count != b->count)
+            return false;
+        // Compare the children
+        for (unsigned int i = 0; i < a->count; i++){
+            if (_node_compare_type_and_name((FileNode*) a->children[i], (FileNode*) b->children[i]) == false)
+                return false;
+        }
+
+    } else {
+        // Check if strlen eq.
+        size_t sza = strlen(a->path);
+        size_t szb = strlen(b->path);
+        if( sza != szb)
+            return false;
+        return (memcmp(a->path, b->path, sza) == 0);
+    }
+
+    return true;
+}
+
+
+
+bool FileTree_structure_eq(FileTree* a, FileTree* b){
+    // Recursively walk down each of the trees, they should all return the same value for names of files and directories.
+    return _node_compare_type_and_name(a->root, b->root);
+}
+
+void FileTree_serialise(FileTree* tree, FILE* fd){
+    FileNode_serialise(tree->root, fd);
+}
+
 
 // Savees a file tree to a file
 void FileTree_save(FileTree* tree, const char* path){
@@ -254,7 +285,7 @@ void FileDescription_serialise(FileDescription* fDescription, FILE* fd){
 FileDescription* FileDescription_deserialise(FILE* fd){
     FileDescription* fileDescription = calloc(1, sizeof(FileDescription));
     fread(fileDescription, sizeof(FileDescription), 1, fd);
-    printf("%d\n", fileDescription->length);
+    //intf("%lld\n", fileDescription->length);
     return fileDescription;
 }
 
@@ -293,7 +324,6 @@ bool FileDescription_eq(FileDescription* a, FileDescription* b){
     return true;
 }
 
-
 void FileDescription_print_stats(FileDescription* fDescription){
     printf("size: %lld\n", fDescription->length);
     printf("modt: %ld\n", fDescription->lastModified);
@@ -302,4 +332,309 @@ void FileDescription_print_stats(FileDescription* fDescription){
         printf("%x", fDescription->hash[i]);
     }
     printf("\n");
+}
+
+// Manifests
+// Requires Free
+ManifestDescription* Manifest_generate(FileTree* tree){
+    ManifestDescription* manifest = calloc(1, sizeof(ManifestDescription));
+    manifest->tree = tree;
+    Manifest_generate_digest(manifest);
+    return manifest;
+}
+
+void Manifest_save_to_file(ManifestDescription* manifest, const char* path){
+    FILE* f = fopen(path, "wb");
+    fwrite(&manifest->digest, 1, MD5_LEN, f);
+    FileTree_serialise(manifest->tree, f);
+    fclose(f);
+}
+
+ManifestDescription* Manifest_read_from_file(const char* path){
+    ManifestDescription* manifest = calloc(1, sizeof(ManifestDescription));
+    FILE* fd = fopen(path, "rb");
+    fread(&manifest->digest, MD5_LEN, 1, fd);
+    manifest->tree = FileTree_deserialise(fd);
+    fclose(fd);
+    return manifest;
+}
+
+
+void _node_modify_digest(FileNode* node, char* digest) {
+    if (node->type == FILETYPE_FILE){
+        if(node->fDescription != NULL){
+            for(unsigned int i = 0; i < MD5_LEN; i++) {
+                digest[i] ^= node->fDescription->hash[i];
+            }
+        }
+    } else if (node->type == FILETYPE_FOLDER) {
+        for(unsigned int i = 0; i < node->count; i++) {
+            _node_modify_digest((FileNode*) node->children[i], digest);
+        }
+    }
+} 
+
+void Manifest_generate_digest(ManifestDescription* manifest){
+    _node_modify_digest(manifest->tree->root, manifest->digest);
+}
+
+
+// File Reigster Entry
+// Requries free, handled in FileRegister_free();
+FileRegisterEntry* FileRegisterEntry_generate_from_FileNode_to_FileRegister(FileNode* node, FileRegister* fRegister){
+    if (node == NULL)
+        return NULL;
+    
+    FileRegisterEntry* entry = calloc(1, sizeof(FileRegisterEntry));
+    if (node->fDescription != NULL)
+        memcpy(entry->hash, node->fDescription->hash, MD5_LEN);
+    entry->pathLength = strlen(node->path);
+    entry->type = node->type;
+    entry->path = calloc(1, entry->pathLength+1);
+    strncpy(entry->path, node->path, entry->pathLength);
+    FileRegister_add_FileRegisterEntry(fRegister, entry);
+    return entry;
+}
+
+void _node_to_FileRegisterEntry (FileNode* node, FileRegister* fRegister) {
+    if (node->type == FILETYPE_FOLDER){
+        for (unsigned int i = 0; i < node->count; i++){
+            _node_to_FileRegisterEntry((FileNode*) node->children[i], fRegister);
+        }
+    } 
+    FileRegisterEntry_generate_from_FileNode_to_FileRegister(node, fRegister);
+}
+
+
+void FileRegisterEntry_free(FileRegisterEntry* entry){
+    if (entry == NULL)
+        return;
+    
+    if (entry->path == NULL){
+        free(entry);
+        return;
+    }
+    
+    free(entry->path);
+    free(entry);
+    return;
+}
+
+void FileRegisterEntry_print(FileRegisterEntry* entry){
+    printf("%.*s\n",  (int) entry->pathLength, entry->path);
+}
+
+// FIle Register
+// Requires Free
+FileRegister* FileRegister_generate_from_FileTree(FileTree* tree){
+    FileRegister* fRegister = calloc(1, sizeof(FileRegister));
+    fRegister->capacity = 8;
+    fRegister->entries = calloc(8, sizeof(FileRegisterEntry*));
+    _node_to_FileRegisterEntry(tree->root, fRegister);
+    return fRegister;
+}
+
+
+void FileRegister_print(FileRegister* fRegister){
+    printf("---------\n");
+    printf("File Register\n");
+    printf("---------\n");
+    printf("Entries:\n");
+    for(unsigned int i = 0; i < fRegister->count; i++){
+        FileRegisterEntry_print(fRegister->entries[i]);
+    }
+    printf("---------\n");
+}
+
+FileRegisterEntry* FileRegisterEntry_find_by_path(FileRegister* fRegister, char* path) {
+    size_t szb = strlen(path);
+    for(unsigned int i = 0; i < fRegister->count; i++){
+        size_t sza = strlen(fRegister->entries[i]->path);
+        if (sza != szb)
+            continue;
+
+        if (memcmp(fRegister->entries[i]->path, path, sza) == 0)
+            return fRegister->entries[i];
+    }
+    
+    return NULL;
+}
+
+FileRegisterEntry* FileRegister_find_by_hash(FileRegister* fRegister, char* hash){
+    for(unsigned int i = 0; i < fRegister->count; i++){
+        if (memcmp(fRegister->entries[i]->hash, hash, MD5_LEN) == 0)
+            return fRegister->entries[i];
+    }
+    
+    return NULL;
+}
+
+
+void FileRegister_add_FileRegisterEntry(FileRegister* fRegister, FileRegisterEntry* fEntry) {
+    // Realloc if needed
+    if (fRegister->count > (fRegister->capacity/2)) {
+        fRegister->capacity *=  2;
+        fRegister->entries = realloc(fRegister->entries, fRegister->capacity * sizeof(FileRegisterEntry*));
+    }
+
+    // Add
+    fRegister->entries[fRegister->count] = fEntry;
+    fRegister->count += 1;
+}
+
+void FileRegister_free(FileRegister* fRegister){
+    if (fRegister->entries == NULL) {
+        free(fRegister);
+        return;
+    }
+
+    for(unsigned int i = 0; i < fRegister->count; i++){
+        if (fRegister->entries[i] != NULL)
+            free(fRegister->entries[i]);
+    }
+    free(fRegister->entries);
+    free(fRegister);
+}
+
+
+
+
+// Manifest Comparison
+
+void _ManifestComparison_add_difference(ManifestComparison* comparison, ManifestDifference* difference) {
+    if (comparison->differenceCount > comparison->differenceCapacity/2){
+        comparison->differenceCapacity *= 2;
+        comparison->differences = realloc(comparison->differences, comparison->differenceCapacity * sizeof(ManifestDifference*));
+    }
+    
+    comparison->differences[comparison->differenceCount] = difference;
+    comparison->differenceCount += 1;
+}
+
+void _ManifestComparison_generate_differences(ManifestComparison* comparison){
+    comparison->differenceCapacity = 8;
+    comparison->differences = calloc(8, sizeof(ManifestDifference*));
+    
+    // Consider all the old files. Check that they exist 
+    for (size_t i = 0; i < comparison->fRegisterOld->count; i++){
+        FileRegisterEntry* thisRegistry = comparison->fRegisterOld->entries[i];
+        FileRegisterEntry* matchingRegistry = NULL; 
+        ManifestDifference* difference = NULL;
+        
+        // Check to see if it is in the new register
+        if ( (matchingRegistry = FileRegisterEntry_find_by_path(comparison->fRegisterNew, thisRegistry->path) )) {
+            // Mark the changed as seen as seen
+            matchingRegistry->consideredDuringEvaluation = true;
+            
+            if ( matchingRegistry->type == thisRegistry->type && matchingRegistry->type == FILETYPE_FILE ){
+                // If it is, compare the hashes. If they match, no changes.
+                if ( memcpy(matchingRegistry->hash, thisRegistry->hash, MD5_LEN) == 0){
+                    continue;
+                }
+            }
+        } 
+        
+        // Allocate because there is now a change.
+        difference = calloc(1, sizeof(ManifestDifference));
+        memcpy(difference->path, thisRegistry->path, thisRegistry->pathLength);
+        
+        // If matchingRegistry is NULL, this is a delete
+        if (matchingRegistry == NULL){
+            difference->type = FILEDIFFERENCE_DELETED;
+            _ManifestComparison_add_difference(comparison, difference);
+            continue;
+        }
+        
+        // Consider filetype change as a FILEDIFFERENCE_TYPE
+        if (matchingRegistry->type != thisRegistry->type ){
+            difference->type = FILEDIFFERENCE_TYPE;
+            _ManifestComparison_add_difference(comparison, difference);
+            continue;
+        }
+        
+        // Else, content is different
+        difference->type = FILEDIFFERENCE_CONTENT;
+        _ManifestComparison_add_difference(comparison, difference);
+        continue;
+    }
+    
+    // Consider all the new files.
+    for (size_t i = 0; i < comparison->fRegisterNew->count; i++)
+    {
+        FileRegisterEntry* newEntry = comparison->fRegisterNew->entries[i];
+        // Disregard if seen
+        if (newEntry->consideredDuringEvaluation)
+            continue;
+        
+        // Add as a new file
+        ManifestDifference* difference = calloc(1, sizeof(ManifestDifference));
+        memcpy(difference->path, newEntry->path, newEntry->pathLength);
+        difference->type = FILEDIFFERENCE_NEW;
+        _ManifestComparison_add_difference(comparison, difference);
+        continue;
+    }
+}
+
+ManifestComparison* ManifestComparison_generate(ManifestDescription* old, ManifestDescription* new){
+    ManifestComparison* comparison = calloc(1, sizeof(ManifestComparison));
+    if (memcmp(old->digest, new->digest, MD5_LEN) == 0){
+        comparison->manifestDiffers = false;
+        return comparison;
+    }
+
+    comparison->manifestDiffers = true;
+    // Walk the trees to determine if the tree structures are the same
+    if (!FileTree_structure_eq(old->tree, new->tree)){
+        comparison->treeDiffers = true;
+    }
+    
+    // Generate FileRegisters
+    comparison->fRegisterNew = FileRegister_generate_from_FileTree(new->tree);
+    comparison->fRegisterOld = FileRegister_generate_from_FileTree(old->tree);
+    
+    // Generate Differences
+    _ManifestComparison_generate_differences(comparison);
+    
+    
+    return comparison;
+}
+
+void ManifestComparison_print(ManifestComparison* comparison) {
+    printf("------------\n");
+    printf("Manifest Comparison:\n");
+    printf(" Manifest Differs: ");
+    if( comparison->manifestDiffers)
+        printf("TRUE\n");
+    else
+        printf("FALSE\n");
+
+    printf(" Tree Differs: ");
+    if( comparison->treeDiffers)
+        printf("TRUE\n");
+    else
+        printf("FALSE\n");
+        
+
+    printf("  Differences:\n");
+    printf("  Count: %u\n", comparison->differenceCount);
+    for(size_t i = 0; i < comparison->differenceCount; i++){
+        printf("Difference '%s': %d\n", comparison->differences[i]->path, comparison->differences[i]->type);
+    }
+    printf("------------\n");
+}
+
+void ManifestComparison_free(ManifestComparison* comparison){
+    if (comparison == NULL)
+        return;
+
+    if (comparison->differences == NULL){
+        free(comparison);
+        return;
+    }
+
+    for (unsigned int i = 0; i < comparison->differenceCount; i++){
+        free(comparison->differences[i]);
+    }
+    free (comparison);
+    return;
 }

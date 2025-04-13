@@ -1,5 +1,10 @@
 # Ignore bin
-bin/
+bin/*
+bin
+
+# Ignore manifest
+./.manifest
+.manifest
 
 # Prerequisites
 *.d
